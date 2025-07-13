@@ -177,7 +177,11 @@ func main() {
 		}
 	})
 
-	r.Run()
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "10000"
+	}
+	r.Run(":" + port)
 }
 
 type ErrorCode uint32
