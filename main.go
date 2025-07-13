@@ -4,16 +4,40 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"sync"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/driver/mysql"
+	"gorm.io/gorm"
 )
 
+type KV struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
 var (
-	token  string
-	mu     sync.Mutex
-	config map[string]any = make(map[string]any)
+	token string
+	db    *gorm.DB
 )
+
+func init() {
+	mysqlDSN := os.Getenv("MYSQL_DSN")
+	if mysqlDSN == "" {
+		log.Fatal("MYSQL_DSN is empty")
+	}
+	var err error
+	db, err = gorm.Open(mysql.Open(mysqlDSN), &gorm.Config{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("connect database failed: %v\n", err)
+
+	token = os.Getenv("CLAVIS_TOKEN")
+	if token == "" {
+		log.Fatal("CLAVIS_TOKEN is empty")
+	}
+	log.Printf("load token success\n")
+}
 
 func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -35,14 +59,6 @@ func AuthMiddleware() gin.HandlerFunc {
 	}
 }
 
-func init() {
-	token = os.Getenv("CLAVIS_TOKEN")
-	if token == "" {
-		log.Fatal("CLAVIS_TOKEN is empty")
-	}
-	log.Printf("load token success\n")
-}
-
 func main() {
 	r := gin.Default()
 
@@ -59,12 +75,20 @@ func main() {
 			return
 		}
 
-		val, exists := config[key]
-		if !exists {
+		kv := &KV{}
+		err := db.Where("`key` = ?", key).First(kv).Error
+		if err == gorm.ErrRecordNotFound {
 			log.Printf("key not exists\n")
 			c.JSON(http.StatusOK, gin.H{
 				"code": GET_ERROR,
 				"msg":  "key not exists",
+			})
+			return
+		} else if err != nil {
+			log.Printf("database query error: %v\n", err)
+			c.JSON(http.StatusOK, gin.H{
+				"code": GET_ERROR,
+				"msg":  "database query error",
 			})
 			return
 		}
@@ -73,7 +97,7 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{
 			"code": 0,
 			"msg":  "get key success",
-			"data": val,
+			"data": kv.Value,
 		})
 	})
 
@@ -102,15 +126,55 @@ func main() {
 			return
 		}
 
-		mu.Lock()
-		defer mu.Unlock()
-		config[key] = req.Value
+		value := req.Value
 
-		log.Printf("set key success\n")
-		c.JSON(http.StatusOK, gin.H{
-			"code": 0,
-			"msg":  "set key success",
-		})
+		kv := &KV{}
+		err := db.Where("`key` = ?", key).First(kv).Error
+		if err == nil {
+			kv.Value = value
+			err := db.Where("`key` = ?", key).Updates(kv).Error
+			if err != nil {
+				log.Printf("update key error: %v\n", err)
+				c.JSON(http.StatusOK, gin.H{
+					"code": GET_ERROR,
+					"msg":  "update key error",
+				})
+				return
+			} else {
+				log.Printf("update key success\n")
+				c.JSON(http.StatusOK, gin.H{
+					"code": 0,
+					"msg":  "update key success",
+				})
+				return
+			}
+		} else if err == gorm.ErrRecordNotFound {
+			kv.Key = key
+			kv.Value = value
+			err := db.Create(kv).Error
+			if err != nil {
+				log.Printf("create key error: %v\n", err)
+				c.JSON(http.StatusOK, gin.H{
+					"code": GET_ERROR,
+					"msg":  "create key error",
+				})
+				return
+			} else {
+				log.Printf("create key success\n")
+				c.JSON(http.StatusOK, gin.H{
+					"code": 0,
+					"msg":  "create key success",
+				})
+				return
+			}
+		} else {
+			log.Printf("database query error: %v\n", err)
+			c.JSON(http.StatusOK, gin.H{
+				"code": GET_ERROR,
+				"msg":  "database query error",
+			})
+			return
+		}
 	})
 
 	r.Run()
